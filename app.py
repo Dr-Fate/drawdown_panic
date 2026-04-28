@@ -3,6 +3,23 @@ import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime
+import json
+import os
+
+PORTFOLIO_FILE = "portfolio_history.json"
+
+def load_portfolio_history():
+    if os.path.exists(PORTFOLIO_FILE):
+        try:
+            with open(PORTFOLIO_FILE, "r") as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_portfolio_history(history):
+    with open(PORTFOLIO_FILE, "w") as f:
+        json.dump(history, f)
 
 def fetch_data(ticker):
     """
@@ -121,6 +138,35 @@ def main():
 
     tickers = [t.strip().upper() for t in ticker_input.split(",") if t.strip()]
 
+    # Portfolio Tracking Module
+    st.header("💼 Seguimiento de Portfolio")
+    portfolio_history = load_portfolio_history()
+
+    # Initialize session state for user data if not present
+    if "user_portfolio" not in st.session_state:
+        st.session_state.user_portfolio = pd.DataFrame(
+            [{"Activo": t, "Capital Invertido (USD)": 0.0, "Valor Actual (USD)": 0.0} for t in tickers]
+        )
+    else:
+        # Update if tickers changed
+        existing_tickers = st.session_state.user_portfolio["Activo"].tolist()
+        if set(existing_tickers) != set(tickers):
+            new_rows = []
+            for t in tickers:
+                if t in existing_tickers:
+                    new_rows.append(st.session_state.user_portfolio[st.session_state.user_portfolio["Activo"] == t].iloc[0].to_dict())
+                else:
+                    new_rows.append({"Activo": t, "Capital Invertido (USD)": 0.0, "Valor Actual (USD)": 0.0})
+            st.session_state.user_portfolio = pd.DataFrame(new_rows)
+
+    edited_portfolio = st.data_editor(
+        st.session_state.user_portfolio,
+        num_rows="fixed",
+        use_container_width=True,
+        key="portfolio_editor"
+    )
+    st.session_state.user_portfolio = edited_portfolio
+
     if "results" not in st.session_state or refresh_button:
         results = []
         data_cache = {}
@@ -139,28 +185,88 @@ def main():
     if st.session_state.results:
         df_results = pd.DataFrame(st.session_state.results)
 
+        # Merge with user portfolio data
+        portfolio_history = load_portfolio_history()
+        user_data_rows = []
+        updated_history = False
+
+        for _, row in edited_portfolio.iterrows():
+            ticker = row["Activo"]
+            valor_actual = row["Valor Actual (USD)"]
+
+            # Get max from history or current if new
+            max_val = portfolio_history.get(ticker, 0.0)
+            if valor_actual > max_val:
+                max_val = valor_actual
+                portfolio_history[ticker] = max_val
+                updated_history = True
+
+            drawdown_user = (valor_actual / max_val - 1) if max_val > 0 else 0.0
+
+            user_data_rows.append({
+                "Activo": ticker,
+                "Valor Usuario": valor_actual,
+                "Máximo Usuario": max_val,
+                "Drawdown Usuario (%)": drawdown_user * 100
+            })
+
+        if updated_history:
+            save_portfolio_history(portfolio_history)
+
+        df_user = pd.DataFrame(user_data_rows)
+        df_results = pd.merge(df_results, df_user, on="Activo")
+
         # 9. EXTRA: ordenar por drawdown
         df_results = df_results.sort_values(by="Drawdown (%)", ascending=True)
 
         st.write(f"Última actualización: {st.session_state.last_refresh}")
 
         # 6. OUTPUT (TABLA PRINCIPAL) & 7. VISUAL
-        def style_state(row):
-            if row["Estado"] == "NORMAL":
-                color = "background-color: #d4edda; color: #155724;" # Green
-            elif row["Estado"] == "ALERTA":
-                color = "background-color: #fff3cd; color: #856404;" # Yellow
-            elif row["Estado"] == "BEAR":
-                color = "background-color: #f8d7da; color: #721c24;" # Red
-            else:
-                color = ""
-            return [color] * len(row)
+        def style_combined(row):
+            styles = [""] * len(row)
 
-        styled_df = df_results.style.apply(style_state, axis=1).format({
+            # Market State Coloring (applies to whole row or specific columns)
+            # Let's apply market state color to the 'Estado' column and user drawdown to its column
+            state_idx = df_results.columns.get_loc("Estado")
+            user_dd_idx = df_results.columns.get_loc("Drawdown Usuario (%)")
+
+            # Market State Color
+            market_color = ""
+            if row["Estado"] == "NORMAL":
+                market_color = "background-color: #d4edda; color: #155724;"
+            elif row["Estado"] == "ALERTA":
+                market_color = "background-color: #fff3cd; color: #856404;"
+            elif row["Estado"] == "BEAR":
+                market_color = "background-color: #f8d7da; color: #721c24;"
+
+            # User Drawdown Color
+            user_dd_val = row["Drawdown Usuario (%)"]
+            user_color = ""
+            if user_dd_val > -10:
+                user_color = "background-color: #d4edda; color: #155724;" # Green
+            elif -20 <= user_dd_val <= -10:
+                user_color = "background-color: #fff3cd; color: #856404;" # Yellow
+            else:
+                user_color = "background-color: #f8d7da; color: #721c24;" # Red
+
+            # Applying styles
+            # Prompt 7 says "Colorear NORMAL -> verde, etc." for market table.
+            # Prompt 5 of NEW request says "Colorear > -10% -> verde, etc." for user drawdown.
+            # Usually users want the whole row colored by state, but let's be more precise.
+            # To match the previous visual where whole row was colored:
+            styles = [market_color] * len(row)
+            styles[user_dd_idx] = user_color # Override user drawdown cell
+
+            return styles
+
+        styled_df = df_results.style.apply(style_combined, axis=1).format({
             "Precio": "{:.2f}",
             "SMA200": "{:.2f}",
             "Dif. SMA200 (%)": "{:.2f}%",
-            "Drawdown (%)": "{:.2f}%"
+            "Drawdown (%)": "{:.2f}%",
+            "Valor Usuario": "{:.2f}",
+            "Máximo Usuario": "{:.2f}",
+            "Drawdown Usuario (%)": "{:.2f}%"
         })
 
         st.dataframe(styled_df, use_container_width=True)
