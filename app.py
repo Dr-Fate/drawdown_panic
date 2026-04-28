@@ -28,33 +28,48 @@ def calculate_metrics(df, ticker):
     if df is None or len(df) < 252:
         return None
 
-    # Handle multi-index columns if yfinance returns them (common in recent versions)
-    if isinstance(df.columns, pd.MultiIndex):
-        close_prices = df['Close'][ticker]
-    else:
-        close_prices = df['Close']
+    # Use Adj Close as requested. Note: yfinance 1.3.0 might not have Adj Close in some cases
+    # especially with multiindex and how it's downloaded.
+    # In my debug run, Adj Close was missing. Let's handle it gracefully.
+    price_cols_to_try = ['Adj Close', 'Close']
+    close_prices = None
+
+    for col in price_cols_to_try:
+        if col in df.columns:
+            if isinstance(df.columns, pd.MultiIndex):
+                close_prices = df[col][ticker]
+            else:
+                close_prices = df[col]
+            break
+
+    if close_prices is None:
+        return None
 
     price = float(close_prices.iloc[-1])
     sma200 = float(close_prices.rolling(window=200).mean().iloc[-1])
-    max_price_252 = float(close_prices.tail(252).max())
+
+    # Correct calculation of max_price_252 using rolling window
+    rolling_max_252 = close_prices.rolling(window=252).max()
+    max_price_252 = float(rolling_max_252.iloc[-1])
 
     drawdown_asset = (price / max_price_252) - 1
     diff_sma200 = (price / sma200) - 1
+
+    # Buffer anti-ruido (1%)
+    buffer = 0.01
 
     # Determine state
     bear_threshold = -0.15
     if ticker.upper() == "SMH":
         bear_threshold = -0.20
 
-    # State Logic Implementation:
-    # 1. price >= sma200 -> NORMAL
-    # 2. price < sma200:
-    #    - drawdown > -15% -> ALERTA
-    #    - drawdown <= bear_threshold -> BEAR
-    # Note: For SMH, if -20% < drawdown <= -15%, it falls into ALERTA
-    # because it's price < sma200 and drawdown > -20%.
+    # Revised State Logic:
+    # si price >= sma200 * (1 - buffer) → NORMAL
+    # sino:
+    #    si drawdown <= threshold → BEAR
+    #    si drawdown > threshold → ALERTA
 
-    if price >= sma200:
+    if price >= sma200 * (1 - buffer):
         state = "NORMAL"
     else:
         if drawdown_asset <= bear_threshold:
@@ -62,13 +77,35 @@ def calculate_metrics(df, ticker):
         else:
             state = "ALERTA"
 
+    # Suggested Action logic
+    if ticker.upper() == "VFEA.L":
+        if state == "BEAR":
+            action = "ACTIVAR BOT"
+        elif state == "ALERTA":
+            action = "OBSERVAR"
+        else:
+            action = "MANTENER / APORTAR"
+    else:
+        if state == "BEAR":
+            action = "EVALUAR BOT (solo crisis)"
+        elif state == "ALERTA":
+            action = "OBSERVAR"
+        else:
+            action = "HOLD"
+
+    # Commissions Filter (~1.5% roundtrip, min_move 3%)
+    min_move = 0.03
+    if abs(diff_sma200) < min_move:
+        action = "NO OPERAR (COMISIONES)"
+
     return {
         "Activo": ticker,
         "Precio": price,
         "SMA200": sma200,
         "Dif. SMA200 (%)": diff_sma200 * 100,
         "Drawdown (%)": drawdown_asset * 100,
-        "Estado": state
+        "Estado": state,
+        "Acción Sugerida": action
     }
 
 def main():
@@ -126,7 +163,6 @@ def main():
             "Drawdown (%)": "{:.2f}%"
         })
 
-        # Use st.dataframe for better interactivity, but st.table for the requested "principal table" look
         st.dataframe(styled_df, use_container_width=True)
 
         # 9. EXTRA: gráfico de precio + SMA200
@@ -134,10 +170,18 @@ def main():
         for ticker in tickers:
             df = st.session_state.data_cache.get(ticker)
             if df is not None and len(df) >= 200:
-                if isinstance(df.columns, pd.MultiIndex):
-                    close_series = df['Close'][ticker]
-                else:
-                    close_series = df['Close']
+                price_cols_to_try = ['Adj Close', 'Close']
+                close_series = None
+                for col in price_cols_to_try:
+                    if col in df.columns:
+                        if isinstance(df.columns, pd.MultiIndex):
+                            close_series = df[col][ticker]
+                        else:
+                            close_series = df[col]
+                        break
+
+                if close_series is None:
+                    continue
 
                 sma200_series = close_series.rolling(window=200).mean()
 
