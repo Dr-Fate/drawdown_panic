@@ -191,6 +191,8 @@ def main():
         st.subheader("📊 Historial del Portfolio")
         all_history = []
         for ticker, data in portfolio_data.items():
+            if not isinstance(data, dict):
+                continue
             for entry in data.get("historial", []):
                 all_history.append({
                     "Fecha": entry["fecha"],
