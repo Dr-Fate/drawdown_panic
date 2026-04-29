@@ -9,19 +9,64 @@ import os
 PORTFOLIO_FILE = "portfolio_history.json"
 
 def load_portfolio_history():
+    data = {}
     if os.path.exists(PORTFOLIO_FILE):
         try:
             with open(PORTFOLIO_FILE, "r") as f:
-                return json.load(f)
+                data = json.load(f)
         except:
-            return {}
-    # Initial structure if file doesn't exist
-    return {}
+            data = {}
+
+    # Migration logic
+    modified = False
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    # Ensure data is a dict
+    if not isinstance(data, dict):
+        data = {}
+
+    for ticker, entry in data.items():
+        if not isinstance(entry, dict):
+            continue
+
+        # Migrate capital_invertido to capital_inicial
+        if "capital_invertido" in entry:
+            monto = float(entry.pop("capital_invertido", 0.0))
+
+            # Find oldest date in history
+            historial = entry.get("historial", [])
+            if historial and isinstance(historial, list):
+                try:
+                    oldest_date = min([h["fecha"] for h in historial if "fecha" in h])
+                except (ValueError, TypeError):
+                    oldest_date = today
+            else:
+                oldest_date = today
+
+            entry["capital_inicial"] = {
+                "monto": monto,
+                "fecha": oldest_date
+            }
+            modified = True
+
+        # Ensure capital_inicial exists if it didn't before migration
+        if "capital_inicial" not in entry:
+            entry["capital_inicial"] = {
+                "monto": 0.0,
+                "fecha": today
+            }
+            modified = True
+
+    if modified:
+        save_portfolio_history(data)
+
+    return data
 
 def save_portfolio_history(history):
     with open(PORTFOLIO_FILE, "w") as f:
         json.dump(history, f, indent=2)
 
+@st.cache_data
 def fetch_data(ticker):
     """
     Fetch historical data for a given ticker.
@@ -29,15 +74,36 @@ def fetch_data(ticker):
     Fetching 2 years of data to be safe.
     """
     try:
-        # Using auto_adjust=True to get adjusted prices if possible,
-        # but yfinance 1.3.0 behavior might vary.
         df = yf.download(ticker, period="2y", progress=False)
         if df.empty:
             return None
         return df
     except Exception as e:
-        st.error(f"Error fetching data for {ticker}: {e}")
         return None
+
+@st.cache_data
+def get_price_at_date(ticker, date_str):
+    """
+    Fetch historical price at a specific date or the first available day after.
+    """
+    try:
+        # Search window of 10 days to handle holidays/weekends
+        start_dt = datetime.strptime(date_str, "%Y-%m-%d")
+        end_dt = start_dt + pd.Timedelta(days=10)
+        df = yf.download(ticker, start=date_str, end=end_dt.strftime("%Y-%m-%d"), progress=False)
+        if df.empty:
+            return None
+
+        price_cols = ['Adj Close', 'Close']
+        for col in price_cols:
+            if col in df.columns:
+                if isinstance(df.columns, pd.MultiIndex):
+                    return float(df[col][ticker].iloc[0])
+                else:
+                    return float(df[col].iloc[0])
+    except:
+        return None
+    return None
 
 def calculate_metrics(df, ticker):
     """
@@ -145,11 +211,22 @@ def main():
                 if not isinstance(existing_entry, dict):
                     existing_entry = {}
 
-                cap_inv = float(existing_entry.get("capital_invertido", 0.0))
+                cap_init = existing_entry.get("capital_inicial", {"monto": 0.0, "fecha": datetime.now().strftime("%Y-%m-%d")})
+                cap_monto = float(cap_init.get("monto", 0.0))
+                cap_fecha_str = cap_init.get("fecha", datetime.now().strftime("%Y-%m-%d"))
+                try:
+                    cap_fecha = datetime.strptime(cap_fecha_str, "%Y-%m-%d").date()
+                except:
+                    cap_fecha = datetime.now().date()
+
                 val_act = float(existing_entry.get("valor_actual", 0.0))
 
-                new_cap = st.number_input(f"Capital Invertido (USD) - {ticker}", value=cap_inv, key=f"cap_{ticker}", label_visibility="collapsed")
-                st.caption("Capital Invertido (USD)")
+                new_cap_monto = st.number_input(f"Capital Inicial (USD) - {ticker}", value=cap_monto, key=f"cap_monto_{ticker}", label_visibility="collapsed")
+                st.caption("Capital Inicial (USD)")
+
+                new_cap_fecha = st.date_input(f"Fecha de Inversión - {ticker}", value=cap_fecha, key=f"cap_fecha_{ticker}", label_visibility="collapsed")
+                st.caption("Fecha de Inversión")
+
                 new_val = st.number_input(f"Valor Actual (USD) - {ticker}", value=val_act, key=f"val_{ticker}", label_visibility="collapsed")
                 st.caption("Valor Actual (USD)")
 
@@ -170,7 +247,10 @@ def main():
                     historial.sort(key=lambda x: x["fecha"])
 
                     portfolio_data[ticker] = {
-                        "capital_invertido": new_cap,
+                        "capital_inicial": {
+                            "monto": new_cap_monto,
+                            "fecha": new_cap_fecha.strftime("%Y-%m-%d")
+                        },
                         "valor_actual": new_val,
                         "max_valor": max_val,
                         "historial": historial
@@ -181,7 +261,10 @@ def main():
 
                 if st.button(f"Resetear Historial {ticker}", key=f"reset_{ticker}"):
                     portfolio_data[ticker] = {
-                        "capital_invertido": 0.0,
+                        "capital_inicial": {
+                            "monto": 0.0,
+                            "fecha": datetime.now().strftime("%Y-%m-%d")
+                        },
                         "valor_actual": 0.0,
                         "max_valor": 0.0,
                         "historial": []
@@ -219,10 +302,6 @@ def main():
             # Check if history was changed in editor
             if not edited_hist.equals(df_hist):
                 # Rebuild portfolio_data from edited_hist
-                # Note: this is a simple implementation. In a real app we'd be more careful.
-                # First, clear all histories but keep capital/max/current?
-                # Actually, better to just update the 'historial' list for each ticker.
-
                 new_histories = {t: [] for t in tickers}
                 for _, row in edited_hist.iterrows():
                     t = row["Activo"]
@@ -236,7 +315,7 @@ def main():
                 for t in tickers:
                     if t in portfolio_data:
                         portfolio_data[t]["historial"] = sorted(new_histories[t], key=lambda x: x["fecha"])
-                        # Update max_valor based on history
+                        # Update max_valor and valor_actual based on history
                         if new_histories[t]:
                             portfolio_data[t]["max_valor"] = max([h["valor"] for h in new_histories[t]])
                             portfolio_data[t]["valor_actual"] = new_histories[t][-1]["valor"]
@@ -287,18 +366,22 @@ def main():
                 entry = {}
             valor_actual = float(entry.get("valor_actual", 0.0))
             max_val = float(entry.get("max_valor", 0.0))
-            cap_inv = float(entry.get("capital_invertido", 0.0))
+
+            cap_init = entry.get("capital_inicial", {"monto": 0.0, "fecha": datetime.now().strftime("%Y-%m-%d")})
+            cap_monto = float(cap_init.get("monto", 0.0))
+            cap_fecha = cap_init.get("fecha", datetime.now().strftime("%Y-%m-%d"))
 
             total_user_value += valor_actual
 
             drawdown_user = (valor_actual / max_val - 1) if max_val > 0 else 0.0
-            drawdown_inv = (valor_actual / cap_inv - 1) if cap_inv > 0 else 0.0
+            drawdown_inv = (valor_actual / cap_monto - 1) if cap_monto > 0 else 0.0
 
             user_data_rows.append({
                 "Activo": ticker,
                 "Valor Usuario": valor_actual,
                 "Máximo Usuario": max_val,
-                "Capital Invertido": cap_inv,
+                "Capital Inicial": cap_monto,
+                "Fecha Inversión": cap_fecha,
                 "Drawdown Usuario (%)": drawdown_user * 100,
                 "Drawdown Inversión (%)": drawdown_inv * 100
             })
@@ -317,17 +400,25 @@ def main():
             if diff_broker > (total_user_value * 0.01): # > 1% diff
                 st.info(f"ℹ️ Diferencia con Broker: ${diff_broker:.2f} (Calculado: ${total_user_value:.2f} vs Broker: ${broker_balance:.2f})")
 
-        # 5. VALIDACIÓN DE DATOS (REVISADA)
+        # 5. VALIDACIÓN DE DATOS (REVISADA: TEMPORAL COHERENCE)
         for _, row in df_results.iterrows():
-            cap_inv = row["Capital Invertido"]
-            dd_activo = row["Drawdown (%)"] / 100
-            valor_teorico = cap_inv * (1 + dd_activo)
+            ticker = row["Activo"]
+            cap_monto = row["Capital Inicial"]
+            cap_fecha = row["Fecha Inversión"]
             valor_real = row["Valor Usuario"]
 
-            if cap_inv > 0:
-                diff_relativa = abs(valor_real / valor_teorico - 1) if valor_teorico > 0 else 0.0
-                if diff_relativa > 0.05:
-                    st.warning(f"⚠️ Posible inconsistencia en {row['Activo']}: El valor real (${valor_real:.2f}) difiere significativamente del teórico (${valor_teorico:.2f}) basado en el mercado. Revisa los valores ingresados o con tu broker.")
+            if cap_monto > 0:
+                precio_inicio = get_price_at_date(ticker, cap_fecha)
+                if precio_inicio:
+                    precio_actual = row["Precio"]
+                    retorno_activo = (precio_actual / precio_inicio) - 1
+                    valor_teorico = cap_monto * (1 + retorno_activo)
+
+                    diff_relativa = abs(valor_real / valor_teorico - 1) if valor_teorico > 0 else 0.0
+                    if diff_relativa > 0.05:
+                        st.warning(f"⚠️ Posible inconsistencia en {ticker}: El valor real (${valor_real:.2f}) difiere significativamente del teórico (${valor_teorico:.2f}) basado en el mercado desde la fecha de inversión ({cap_fecha}). Revisa los valores ingresados o con tu broker.")
+                else:
+                    st.error(f"No se pudo obtener el precio histórico para {ticker} en la fecha {cap_fecha}.")
 
         # 6. OUTPUT (TABLA PRINCIPAL) & 7. VISUAL
         def style_combined(row):
@@ -374,6 +465,7 @@ def main():
             "Drawdown (%)": "{:.2f}%",
             "Valor Usuario": "{:.2f}",
             "Máximo Usuario": "{:.2f}",
+            "Capital Inicial": "{:.2f}",
             "Drawdown Usuario (%)": "{:.2f}%",
             "Drawdown Inversión (%)": "{:.2f}%"
         })
