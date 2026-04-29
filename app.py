@@ -153,6 +153,10 @@ def main():
             with st.expander(f"📥 {ticker}", expanded=False):
                 # Retrieve existing data from JSON
                 existing_entry = portfolio_data.get(ticker, {})
+                # Data migration/Robustness: if existing_entry is not a dict, reset to empty dict
+                if not isinstance(existing_entry, dict):
+                    existing_entry = {}
+
                 cap_inv = float(existing_entry.get("capital_invertido", 0.0))
                 val_act = float(existing_entry.get("valor_actual", 0.0))
 
@@ -235,6 +239,8 @@ def main():
 
         for ticker in tickers:
             entry = portfolio_data.get(ticker, {})
+            if not isinstance(entry, dict):
+                entry = {}
             valor_actual = float(entry.get("valor_actual", 0.0))
             max_val = float(entry.get("max_valor", 0.0))
 
