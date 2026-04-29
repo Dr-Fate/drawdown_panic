@@ -46,9 +46,6 @@ def calculate_metrics(df, ticker):
     if df is None or len(df) < 252:
         return None
 
-    # Use Adj Close as requested. Note: yfinance 1.3.0 might not have Adj Close in some cases
-    # especially with multiindex and how it's downloaded.
-    # In my debug run, Adj Close was missing. Let's handle it gracefully.
     price_cols_to_try = ['Adj Close', 'Close']
     close_prices = None
 
@@ -66,26 +63,17 @@ def calculate_metrics(df, ticker):
     price = float(close_prices.iloc[-1])
     sma200 = float(close_prices.rolling(window=200).mean().iloc[-1])
 
-    # Correct calculation of max_price_252 using rolling window
     rolling_max_252 = close_prices.rolling(window=252).max()
     max_price_252 = float(rolling_max_252.iloc[-1])
 
     drawdown_asset = (price / max_price_252) - 1
     diff_sma200 = (price / sma200) - 1
 
-    # Buffer anti-ruido (1%)
     buffer = 0.01
 
-    # Determine state
     bear_threshold = -0.15
     if ticker.upper() == "SMH":
         bear_threshold = -0.20
-
-    # Revised State Logic:
-    # si price >= sma200 * (1 - buffer) → NORMAL
-    # sino:
-    #    si drawdown <= threshold → BEAR
-    #    si drawdown > threshold → ALERTA
 
     if price >= sma200 * (1 - buffer):
         state = "NORMAL"
@@ -95,7 +83,6 @@ def calculate_metrics(df, ticker):
         else:
             state = "ALERTA"
 
-    # Suggested Action logic
     if ticker.upper() == "VFEA.L":
         if state == "BEAR":
             action = "ACTIVAR BOT"
@@ -111,7 +98,6 @@ def calculate_metrics(df, ticker):
         else:
             action = "MANTENER"
 
-    # Commissions Filter (~1.5% roundtrip, min_move 3%)
     min_move = 0.03
     if abs(diff_sma200) < min_move:
         action = "NO OPERAR (COMISIONES)"
@@ -142,6 +128,10 @@ def main():
     # Portfolio Tracking Module
     st.header("💼 Seguimiento de Portfolio")
     st.write(f"Fecha actual: {datetime.now().strftime('%Y-%m-%d')}")
+
+    # Optional Broker Balance
+    broker_balance = st.sidebar.number_input("Saldo Broker (USD) - Opcional", value=0.0, step=100.0)
+
     portfolio_data = load_portfolio_history()
 
     # Section Usuario vs Mercado (Visual Separation)
@@ -151,9 +141,7 @@ def main():
         st.subheader("📍 Entrada de Datos")
         for ticker in tickers:
             with st.expander(f"📥 {ticker}", expanded=False):
-                # Retrieve existing data from JSON
                 existing_entry = portfolio_data.get(ticker, {})
-                # Data migration/Robustness: if existing_entry is not a dict, reset to empty dict
                 if not isinstance(existing_entry, dict):
                     existing_entry = {}
 
@@ -166,16 +154,20 @@ def main():
                 st.caption("Valor Actual (USD)")
 
                 if st.button(f"Guardar {ticker}", key=f"save_{ticker}"):
-                    # Update structure
                     max_val = float(existing_entry.get("max_valor", 0.0))
                     if new_val > max_val:
                         max_val = new_val
 
                     historial = existing_entry.get("historial", [])
+                    # Evitar duplicados por fecha
+                    today = datetime.now().strftime("%Y-%m-%d")
+                    historial = [h for h in historial if h["fecha"] != today]
                     historial.append({
-                        "fecha": datetime.now().strftime("%Y-%m-%d"),
+                        "fecha": today,
                         "valor": new_val
                     })
+                    # Mantener historial ordenado cronológicamente
+                    historial.sort(key=lambda x: x["fecha"])
 
                     portfolio_data[ticker] = {
                         "capital_invertido": new_cap,
@@ -187,28 +179,77 @@ def main():
                     st.success(f"Datos de {ticker} guardados.")
                     st.rerun()
 
+                if st.button(f"Resetear Historial {ticker}", key=f"reset_{ticker}"):
+                    portfolio_data[ticker] = {
+                        "capital_invertido": 0.0,
+                        "valor_actual": 0.0,
+                        "max_valor": 0.0,
+                        "historial": []
+                    }
+                    save_portfolio_history(portfolio_data)
+                    st.warning(f"Historial de {ticker} reseteado.")
+                    st.rerun()
+
     with user_col2:
         st.subheader("📊 Historial del Portfolio")
-        all_history = []
-        for ticker, data in portfolio_data.items():
-            if not isinstance(data, dict):
-                continue
-            for entry in data.get("historial", []):
-                all_history.append({
-                    "Fecha": entry["fecha"],
-                    "Activo": ticker,
-                    "Valor (USD)": entry["valor"]
-                })
 
-        if all_history:
-            df_hist = pd.DataFrame(all_history).sort_values(by="Fecha", ascending=False)
-            st.dataframe(df_hist, use_container_width=True)
+        # Display deterministic history from JSON
+        history_rows = []
+        for ticker in tickers:
+            data = portfolio_data.get(ticker, {})
+            if isinstance(data, dict):
+                for entry in data.get("historial", []):
+                    history_rows.append({
+                        "Fecha": entry["fecha"],
+                        "Activo": ticker,
+                        "Valor (USD)": float(entry["valor"])
+                    })
 
-            # Evolution chart for user portfolio
+        if history_rows:
+            df_hist = pd.DataFrame(history_rows).sort_values(by=["Fecha", "Activo"], ascending=[False, True])
+
+            # Management UI: st.data_editor for history
+            edited_hist = st.data_editor(
+                df_hist,
+                use_container_width=True,
+                num_rows="dynamic",
+                key="history_editor"
+            )
+
+            # Check if history was changed in editor
+            if not edited_hist.equals(df_hist):
+                # Rebuild portfolio_data from edited_hist
+                # Note: this is a simple implementation. In a real app we'd be more careful.
+                # First, clear all histories but keep capital/max/current?
+                # Actually, better to just update the 'historial' list for each ticker.
+
+                new_histories = {t: [] for t in tickers}
+                for _, row in edited_hist.iterrows():
+                    t = row["Activo"]
+                    if t in new_histories:
+                        new_histories[t].append({
+                            "fecha": row["Fecha"],
+                            "valor": float(row["Valor (USD)"])
+                        })
+
+                # Update JSON data
+                for t in tickers:
+                    if t in portfolio_data:
+                        portfolio_data[t]["historial"] = sorted(new_histories[t], key=lambda x: x["fecha"])
+                        # Update max_valor based on history
+                        if new_histories[t]:
+                            portfolio_data[t]["max_valor"] = max([h["valor"] for h in new_histories[t]])
+                            portfolio_data[t]["valor_actual"] = new_histories[t][-1]["valor"]
+
+                save_portfolio_history(portfolio_data)
+                st.info("Historial actualizado y persistido.")
+                st.rerun()
+
+            # Evolution chart
             st.subheader("📈 Evolución del Valor")
             fig_user = go.Figure()
             for ticker in tickers:
-                ticker_hist = [h for h in all_history if h["Activo"] == ticker]
+                ticker_hist = [h for h in history_rows if h["Activo"] == ticker]
                 if ticker_hist:
                     df_ticker_hist = pd.DataFrame(ticker_hist).sort_values(by="Fecha")
                     fig_user.add_trace(go.Scatter(x=df_ticker_hist["Fecha"], y=df_ticker_hist["Valor (USD)"], name=ticker))
@@ -238,6 +279,7 @@ def main():
 
         # Merge with user portfolio data
         user_data_rows = []
+        total_user_value = 0.0
 
         for ticker in tickers:
             entry = portfolio_data.get(ticker, {})
@@ -245,14 +287,20 @@ def main():
                 entry = {}
             valor_actual = float(entry.get("valor_actual", 0.0))
             max_val = float(entry.get("max_valor", 0.0))
+            cap_inv = float(entry.get("capital_invertido", 0.0))
+
+            total_user_value += valor_actual
 
             drawdown_user = (valor_actual / max_val - 1) if max_val > 0 else 0.0
+            drawdown_inv = (valor_actual / cap_inv - 1) if cap_inv > 0 else 0.0
 
             user_data_rows.append({
                 "Activo": ticker,
                 "Valor Usuario": valor_actual,
                 "Máximo Usuario": max_val,
-                "Drawdown Usuario (%)": drawdown_user * 100
+                "Capital Invertido": cap_inv,
+                "Drawdown Usuario (%)": drawdown_user * 100,
+                "Drawdown Inversión (%)": drawdown_inv * 100
             })
 
         df_user = pd.DataFrame(user_data_rows)
@@ -263,12 +311,23 @@ def main():
 
         st.write(f"Última actualización: {st.session_state.last_refresh}")
 
-        # 5. VALIDACIÓN DE DATOS
+        # Check Broker Discrepancy
+        if broker_balance > 0:
+            diff_broker = abs(broker_balance - total_user_value)
+            if diff_broker > (total_user_value * 0.01): # > 1% diff
+                st.info(f"ℹ️ Diferencia con Broker: ${diff_broker:.2f} (Calculado: ${total_user_value:.2f} vs Broker: ${broker_balance:.2f})")
+
+        # 5. VALIDACIÓN DE DATOS (REVISADA)
         for _, row in df_results.iterrows():
-            dd_user = row["Drawdown Usuario (%)"]
-            dd_activo = row["Drawdown (%)"]
-            if abs(dd_user - dd_activo) > 10:
-                st.warning(f"⚠️ Posible inconsistencia en {row['Activo']}: drawdown usuario ({dd_user:.2f}%) vs activo ({dd_activo:.2f}%). Revisa los valores ingresados.")
+            cap_inv = row["Capital Invertido"]
+            dd_activo = row["Drawdown (%)"] / 100
+            valor_teorico = cap_inv * (1 + dd_activo)
+            valor_real = row["Valor Usuario"]
+
+            if cap_inv > 0:
+                diff_relativa = abs(valor_real / valor_teorico - 1) if valor_teorico > 0 else 0.0
+                if diff_relativa > 0.05:
+                    st.warning(f"⚠️ Posible inconsistencia en {row['Activo']}: El valor real (${valor_real:.2f}) difiere significativamente del teórico (${valor_teorico:.2f}) basado en el mercado. Revisa los valores ingresados o con tu broker.")
 
         # 6. OUTPUT (TABLA PRINCIPAL) & 7. VISUAL
         def style_combined(row):
@@ -315,7 +374,8 @@ def main():
             "Drawdown (%)": "{:.2f}%",
             "Valor Usuario": "{:.2f}",
             "Máximo Usuario": "{:.2f}",
-            "Drawdown Usuario (%)": "{:.2f}%"
+            "Drawdown Usuario (%)": "{:.2f}%",
+            "Drawdown Inversión (%)": "{:.2f}%"
         })
 
         st.subheader("🏛️ Resumen de Mercado y Usuario")
