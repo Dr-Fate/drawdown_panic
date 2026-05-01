@@ -185,7 +185,7 @@ def main():
 
     # Sidebar for inputs
     st.sidebar.header("Configuración")
-    default_tickers = "VUSA.L, VFEA.L, SMH"
+    default_tickers = "VUAA.L, VFEA.L, SMH"
     ticker_input = st.sidebar.text_area("Lista de Tickers (separados por coma)", default_tickers)
     refresh_button = st.sidebar.button("Refrescar Datos")
 

@@ -2,16 +2,7 @@
   "VUSA.L": {
     "valor_actual": 1050.0,
     "max_valor": 1100.0,
-    "historial": [
-      {
-        "fecha": "2023-01-01",
-        "valor": 1000.0
-      },
-      {
-        "fecha": "2023-02-01",
-        "valor": 1050.0
-      }
-    ],
+    "historial": [],
     "capital_inicial": {
       "monto": 1000.0,
       "fecha": "2023-01-01"
@@ -20,12 +11,7 @@
   "VFEA.L": {
     "valor_actual": 450.0,
     "max_valor": 500.0,
-    "historial": [
-      {
-        "fecha": "2023-01-01",
-        "valor": 500.0
-      }
-    ],
+    "historial": [],
     "capital_inicial": {
       "monto": 500.0,
       "fecha": "2023-01-01"
